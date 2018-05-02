@@ -5,9 +5,11 @@
             [metabase
              [driver :as driver]
              [query-processor :as qp]
-             [query-processor-test :refer [non-timeseries-engines-with-feature first-row format-rows-by]]]
+             [query-processor-test :as qpt :refer [first-row format-rows-by]]]
             [metabase.query-processor.middleware.parameters.sql :as sql :refer :all]
-            [metabase.test.data :as data]
+            [metabase.test
+             [data :as data]
+             [util :as tu]]
             [metabase.test.data
              [datasets :as datasets]
              [generic-sql :as generic-sql]]
@@ -329,7 +331,9 @@
 ;;; ------------------------------------------- expansion tests: variables -------------------------------------------
 
 (defn- expand* [query]
-  (-> (expand (assoc query :driver (driver/engine->driver :h2)))
+  (-> (expand (assoc query
+                :driver   (driver/engine->driver :h2)
+                :settings {:report-timezone "UTC"}))
       :native
       (select-keys [:query :params])))
 
@@ -529,11 +533,11 @@
 
 ;; as with the MBQL parameters tests Redshift and Crate fail for unknown reasons; disable their tests for now
 (def ^:private ^:const sql-parameters-engines
-  (disj (non-timeseries-engines-with-feature :native-parameters) :redshift :crate))
+  (disj (qpt/non-timeseries-engines-with-feature :native-parameters) :redshift :crate))
 
 (defn- process-native {:style/indent 0} [& kvs]
   (qp/process-query
-    (apply assoc {:database (data/id), :type :native} kvs)))
+    (apply assoc {:database (data/id), :type :native, :settings {:report-timezone "UTC"}} kvs)))
 
 (datasets/expect-with-engines sql-parameters-engines
   [29]
@@ -577,66 +581,83 @@
        :parameters [{:type "date/range",  :target ["dimension" ["template-tag" "checkin_date"]], :value "2015-01-01~2016-09-01"}
                     {:type "date/single", :target ["dimension" ["template-tag" "checkin_date"]], :value "2015-07-01"}]))))
 
+;; Test that native dates are parsed with the report timezone (when supported)
+(datasets/expect-with-engines sql-parameters-engines
+  [(if (qpt/supports-report-timezone? datasets/*engine*)
+     "2018-04-18T00:00:00.000-07:00"
+     "2018-04-18T00:00:00.000Z")]
+  (tu/with-temporary-setting-values [report-timezone "America/Los_Angeles"]
+    (first-row
+      (process-native
+        :native     {:query         "SELECT cast({{date}} as date)"
+                     :template_tags {:date {:name "date" :display_name "Date" :type "date" }}}
+        :parameters [{:type "date/single" :target ["variable" ["template-tag" "date"]] :value "2018-04-18"}]))))
+
 
 ;;; -------------------------------------------- SQL PARAMETERS 2.0 TESTS --------------------------------------------
 
 ;; Some random end-to-end param expansion tests added as part of the SQL Parameters 2.0 rewrite
+
+(def ^:private query-defaults
+  {:driver     (driver/engine->driver :h2)
+   :settings   {:report-timezone "UTC"}
+   :parameters []})
 
 (expect
   {:query         "SELECT count(*) FROM CHECKINS WHERE CAST(\"PUBLIC\".\"CHECKINS\".\"DATE\" AS date) BETWEEN ? AND ?"
    :template_tags {:created_at {:name "created_at", :display_name "Created At", :type "dimension", :dimension ["field-id" (data/id :checkins :date)]}},
    :params        [#inst "2017-03-01T00:00:00.000000000-00:00"
                    #inst "2017-03-31T00:00:00.000000000-00:00"]}
-  (:native (expand {:driver     (driver/engine->driver :h2)
-                    :native     {:query         "SELECT count(*) FROM CHECKINS WHERE {{created_at}}"
-                                 :template_tags {:created_at {:name "created_at", :display_name "Created At", :type "dimension", :dimension ["field-id" (data/id :checkins :date)]}}}
-                    :parameters [{:type "date/month-year", :target ["dimension" ["template-tag" "created_at"]], :value "2017-03"}]})))
+  (:native (expand (merge query-defaults
+                          {:native     {:query         "SELECT count(*) FROM CHECKINS WHERE {{created_at}}"
+                                        :template_tags {:created_at {:name "created_at", :display_name "Created At",
+                                                                     :type "dimension", :dimension ["field-id" (data/id :checkins :date)]}}}
+                           :parameters [{:type "date/month-year", :target ["dimension" ["template-tag" "created_at"]], :value "2017-03"}]}))))
 
 (expect
   {:query         "SELECT count(*) FROM ORDERS"
    :template_tags {:price {:name "price", :display_name "Price", :type "number", :required false}}
    :params        []}
-  (:native (expand {:driver     (driver/engine->driver :h2)
-                    :native     {:query         "SELECT count(*) FROM ORDERS [[WHERE price > {{price}}]]"
-                                 :template_tags {:price {:name "price", :display_name "Price", :type "number", :required false}}}
-                    :parameters []})))
+  (:native (expand (merge query-defaults
+                          {:native     {:query         "SELECT count(*) FROM ORDERS [[WHERE price > {{price}}]]"
+                                        :template_tags {:price {:name "price", :display_name "Price", :type "number", :required false}}}}))))
 
 (expect
   {:query         "SELECT count(*) FROM ORDERS WHERE price > 100"
    :template_tags {:price {:name "price", :display_name "Price", :type "number", :required false}}
    :params        []}
-  (:native (expand {:driver     (driver/engine->driver :h2)
-                    :native     {:query         "SELECT count(*) FROM ORDERS [[WHERE price > {{price}}]]"
-                                 :template_tags {:price {:name "price", :display_name "Price", :type "number", :required false}}}
-                    :parameters [{:type "category", :target ["variable" ["template-tag" "price"]], :value "100"}]})))
+  (:native (expand (merge query-defaults
+                          {:native      {:query         "SELECT count(*) FROM ORDERS [[WHERE price > {{price}}]]"
+                                         :template_tags {:price {:name "price", :display_name "Price", :type "number", :required false}}}
+                          :parameters   [{:type "category", :target ["variable" ["template-tag" "price"]], :value "100"}]}))))
 
 (expect
   {:query         "SELECT count(*) FROM PRODUCTS WHERE TITLE LIKE ?"
    :template_tags {:x {:name "x", :display_name "X", :type "text", :required true, :default "%Toucan%"}}
    :params        ["%Toucan%"]}
-  (:native (expand {:driver     (driver/engine->driver :h2)
-                    :native     {:query         "SELECT count(*) FROM PRODUCTS WHERE TITLE LIKE {{x}}",
-                                 :template_tags {:x {:name "x", :display_name "X", :type "text", :required true, :default "%Toucan%"}}},
-                    :parameters [{:type "category", :target ["variable" ["template-tag" "x"]]}]})))
+  (:native (expand (merge query-defaults
+                          {:native     {:query         "SELECT count(*) FROM PRODUCTS WHERE TITLE LIKE {{x}}",
+                                        :template_tags {:x {:name "x", :display_name "X", :type "text", :required true, :default "%Toucan%"}}},
+                           :parameters [{:type "category", :target ["variable" ["template-tag" "x"]]}]}))))
 
 ;; make sure that you can use the same parameter multiple times (#4659)
 (expect
   {:query         "SELECT count(*) FROM products WHERE title LIKE ? AND subtitle LIKE ?"
    :template_tags {:x {:name "x", :display_name "X", :type "text", :required true, :default "%Toucan%"}}
    :params        ["%Toucan%" "%Toucan%"]}
-  (:native (expand {:driver     (driver/engine->driver :h2)
-                    :native     {:query         "SELECT count(*) FROM products WHERE title LIKE {{x}} AND subtitle LIKE {{x}}",
-                                 :template_tags {:x {:name "x", :display_name "X", :type "text", :required true, :default "%Toucan%"}}},
-                    :parameters [{:type "category", :target ["variable" ["template-tag" "x"]]}]})))
+  (:native (expand (merge query-defaults
+                          {:native     {:query         "SELECT count(*) FROM products WHERE title LIKE {{x}} AND subtitle LIKE {{x}}",
+                                        :template_tags {:x {:name "x", :display_name "X", :type "text", :required true, :default "%Toucan%"}}},
+                           :parameters [{:type "category", :target ["variable" ["template-tag" "x"]]}]}))))
 
 (expect
   {:query         "SELECT * FROM ORDERS WHERE true  AND ID = ? OR USER_ID = ?"
    :template_tags {:id {:name "id", :display_name "ID", :type "text"}}
    :params        ["2" "2"]}
-  (:native (expand {:driver     (driver/engine->driver :h2)
-                    :native     {:query         "SELECT * FROM ORDERS WHERE true [[ AND ID = {{id}} OR USER_ID = {{id}} ]]"
-                                 :template_tags {:id {:name "id", :display_name "ID", :type "text"}}}
-                    :parameters [{:type "category", :target ["variable" ["template-tag" "id"]], :value "2"}]})))
+  (:native (expand (merge query-defaults
+                          {:native     {:query         "SELECT * FROM ORDERS WHERE true [[ AND ID = {{id}} OR USER_ID = {{id}} ]]"
+                                        :template_tags {:id {:name "id", :display_name "ID", :type "text"}}}
+                           :parameters [{:type "category", :target ["variable" ["template-tag" "id"]], :value "2"}]}))))
 
 
 ;;; +----------------------------------------------------------------------------------------------------------------+
@@ -656,18 +677,18 @@
    :params        [#inst "2017-10-31T00:00:00.000000000-00:00"
                    #inst "2017-11-04T00:00:00.000000000-00:00"]}
   (with-redefs [t/now (constantly (t/date-time 2017 11 05 12 0 0))]
-    (:native (expand {:driver     (driver/engine->driver :h2)
-                      :native     {:query         (str "SELECT count(*) AS \"count\", \"DATE\" "
-                                                       "FROM CHECKINS "
-                                                       "WHERE {{checkin_date}} "
-                                                       "GROUP BY \"DATE\"")
-                                   :template_tags {:checkin_date {:name         "checkin_date"
-                                                                  :display_name "Checkin Date"
-                                                                  :type         "dimension"
-                                                                  :dimension    ["field-id" (data/id :checkins :date)]}}}
-                      :parameters [{:type   "date/range"
-                                    :target ["dimension" ["template-tag" "checkin_date"]]
-                                    :value  "past5days"}]}))))
+    (:native (expand (merge query-defaults
+                            {:native     {:query         (str "SELECT count(*) AS \"count\", \"DATE\" "
+                                                              "FROM CHECKINS "
+                                                              "WHERE {{checkin_date}} "
+                                                              "GROUP BY \"DATE\"")
+                                          :template_tags {:checkin_date {:name         "checkin_date"
+                                                                         :display_name "Checkin Date"
+                                                                         :type         "dimension"
+                                                                         :dimension    ["field-id" (data/id :checkins :date)]}}}
+                             :parameters [{:type   "date/range"
+                                           :target ["dimension" ["template-tag" "checkin_date"]]
+                                           :value  "past5days"}]})))))
 
 ;; Make sure defaults values get picked up for field filter clauses
 (expect
@@ -700,17 +721,17 @@
    :params        [#inst "2017-10-31T00:00:00.000000000-00:00"
                    #inst "2017-11-04T00:00:00.000000000-00:00"]}
   (with-redefs [t/now (constantly (t/date-time 2017 11 05 12 0 0))]
-    (:native (expand {:driver (driver/engine->driver :h2)
-                      :native {:query         (str "SELECT count(*) AS \"count\", \"DATE\" "
-                                                   "FROM CHECKINS "
-                                                   "WHERE {{checkin_date}} "
-                                                   "GROUP BY \"DATE\"")
-                               :template_tags {:checkin_date {:name         "checkin_date"
-                                                              :display_name "Checkin Date"
-                                                              :type         "dimension"
-                                                              :dimension    ["field-id" (data/id :checkins :date)]
-                                                              :default      "past5days"
-                                                              :widget_type  "date/all-options"}}}}))))
+    (:native (expand (merge query-defaults
+                            {:native {:query         (str "SELECT count(*) AS \"count\", \"DATE\" "
+                                                          "FROM CHECKINS "
+                                                          "WHERE {{checkin_date}} "
+                                                          "GROUP BY \"DATE\"")
+                                      :template_tags {:checkin_date {:name         "checkin_date"
+                                                                     :display_name "Checkin Date"
+                                                                     :type         "dimension"
+                                                                     :dimension    ["field-id" (data/id :checkins :date)]
+                                                                     :default      "past5days"
+                                                                     :widget_type  "date/all-options"}}}})))))
 
 ;; Check that it works with absolute dates as well
 (expect
@@ -725,17 +746,17 @@
                                   :default      "2017-11-14"
                                   :widget_type  "date/all-options"}}
    :params        [#inst "2017-11-14T00:00:00.000000000-00:00"]}
-  (:native (expand {:driver (driver/engine->driver :h2)
-                    :native {:query         (str "SELECT count(*) AS \"count\", \"DATE\" "
-                                                 "FROM CHECKINS "
-                                                 "WHERE {{checkin_date}} "
-                                                 "GROUP BY \"DATE\"")
-                             :template_tags {:checkin_date {:name         "checkin_date"
-                                                            :display_name "Checkin Date"
-                                                            :type         "dimension"
-                                                            :dimension    ["field-id" (data/id :checkins :date)]
-                                                            :default      "2017-11-14"
-                                                            :widget_type  "date/all-options"}}}})))
+  (:native (expand (merge query-defaults
+                          {:native {:query         (str "SELECT count(*) AS \"count\", \"DATE\" "
+                                                        "FROM CHECKINS "
+                                                        "WHERE {{checkin_date}} "
+                                                        "GROUP BY \"DATE\"")
+                                    :template_tags {:checkin_date {:name         "checkin_date"
+                                                                   :display_name "Checkin Date"
+                                                                   :type         "dimension"
+                                                                   :dimension    ["field-id" (data/id :checkins :date)]
+                                                                   :default      "2017-11-14"
+                                                                   :widget_type  "date/all-options"}}}}))))
 
 
 ;;; ------------------------------- Multiple Value Support (comma-separated or array) --------------------------------

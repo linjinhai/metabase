@@ -7,7 +7,7 @@
             [clojure
              [data :as data]
              [pprint :refer [pprint]]
-             [string :as s]]
+             [string :as str]]
             [clojure.java
              [classpath :as classpath]
              [jdbc :as jdbc]]
@@ -17,13 +17,14 @@
             colorize.core ; this needs to be loaded for `format-color`
             [metabase.config :as config]
             [puppetlabs.i18n.core :as i18n :refer [trs]]
-            [ring.util.codec :as codec])
+            [ring.util.codec :as codec]
+            [schema.core :as s])
   (:import clojure.lang.Keyword
            [java.net InetAddress InetSocketAddress Socket]
            [java.sql SQLException Time Timestamp]
            [java.text Normalizer Normalizer$Form]
            [java.util Calendar Date TimeZone]
-           org.joda.time.DateTime
+           [org.joda.time DateTime DateTimeZone]
            org.joda.time.format.DateTimeFormatter))
 
 ;; This is the very first log message that will get printed.  It's here because this is one of the very first
@@ -44,28 +45,64 @@
 
 (defprotocol ITimestampCoercible
   "Coerce object to a `java.sql.Timestamp`."
-  (->Timestamp ^java.sql.Timestamp [this]
+  (coerce-to-timestamp ^java.sql.Timestamp [this] [this timezone-coercible]
     "Coerce this object to a `java.sql.Timestamp`. Strings are parsed as ISO-8601."))
+
+(defprotocol ITimeZoneCoercible
+  "Coerce object to `java.util.TimeZone`"
+  (coerce-to-timezone ^TimeZone [this]
+    "Coerce `this` to `java.util.TimeZone`"))
+
+(extend-protocol ITimeZoneCoercible
+  String
+  (coerce-to-timezone [this]
+    (TimeZone/getTimeZone this))
+  TimeZone
+  (coerce-to-timezone [this]
+    this)
+  DateTimeZone
+  (coerce-to-timezone [this]
+    (.toTimeZone this)))
 
 (declare str->date-time)
 
+(def ^TimeZone utc
+  "UTC TimeZone"
+  (coerce-to-timezone "UTC"))
+
 (extend-protocol ITimestampCoercible
-  nil       (->Timestamp [_]
-              nil)
-  Timestamp (->Timestamp [this]
-              this)
-  Date       (->Timestamp [this]
-               (Timestamp. (.getTime this)))
+  nil
+  (coerce-to-timestamp [_]
+    nil)
+  Timestamp
+  (coerce-to-timestamp [this]
+    this)
+  Date
+  (coerce-to-timestamp
+    [this]
+    (coerce/to-timestamp (coerce/from-date this)))
   ;; Number is assumed to be a UNIX timezone in milliseconds (UTC)
-  Number    (->Timestamp [this]
-              (Timestamp. this))
-  Calendar  (->Timestamp [this]
-              (->Timestamp (.getTime this)))
-  ;; Strings are expected to be in ISO-8601 format. `YYYY-MM-DD` strings *are* valid ISO-8601 dates.
-  String    (->Timestamp [this]
-              (->Timestamp (str->date-time this)))
-  DateTime  (->Timestamp [this]
-              (->Timestamp (.getMillis this))))
+  Number
+  (coerce-to-timestamp [this]
+    (coerce/to-timestamp (coerce/from-long (long this))))
+  Calendar
+  (coerce-to-timestamp [this]
+    (coerce-to-timestamp (.getTime this)))
+  DateTime
+  (coerce-to-timestamp [this]
+    (coerce/to-timestamp this)))
+
+(defn ->Timestamp
+  "Converts `coercible-to-ts` to a `java.util.Timestamp`. Requires a `coercible-to-tz` if converting a string. Leans
+  on clj-time to ensure correct conversions between the various types"
+  ([coercible-to-ts]
+   (->Timestamp coercible-to-ts nil))
+  ([coercible-to-ts coercible-to-tz]
+   {:pre [(or (not (string? coercible-to-ts))
+              (and (string? coercible-to-ts) coercible-to-tz))]}
+   (if (string? coercible-to-ts)
+     (coerce-to-timestamp (str->date-time coercible-to-ts (coerce-to-timezone coercible-to-tz)))
+     (coerce-to-timestamp coercible-to-ts))))
 
 
 (defprotocol IDateTimeFormatterCoercible
@@ -174,7 +211,7 @@
   [^String s]
   (boolean (when (string? s)
              (ignore-exceptions
-               (->Timestamp s)))))
+               (->Timestamp s utc)))))
 
 
 (defn ->Date
@@ -256,7 +293,8 @@
 (defn- trunc-with-format [format-string date timezone-id]
   (->Timestamp (format-date (time/with-zone (time/formatter format-string)
                               (t/time-zone-for-id timezone-id))
-                            date)))
+                            date)
+               timezone-id))
 
 (defn- trunc-with-floor [date amount-ms]
   (->Timestamp (* (math/floor (/ (.getTime (->Timestamp date))
@@ -348,7 +386,7 @@
       (loop [acc []]
         (if-let [line (.readLine this)]
           (recur (conj acc line))
-          (s/join "\n" acc)))))
+          (str/join "\n" acc)))))
 
   ;; H2 -- See also http://h2database.com/javadoc/org/h2/jdbc/JdbcClob.html
   org.h2.jdbc.JdbcClob
@@ -381,7 +419,7 @@
   ^Boolean [^String s]
   (boolean (when (string? s)
              (re-matches #"[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*@(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
-                         (s/lower-case s)))))
+                         (str/lower-case s)))))
 
 
 (defn url?
@@ -416,15 +454,15 @@
 
    It can also be used to make sure a given function won't throw a `NullPointerException`:
 
-     (s/lower-case nil)            -> NullPointerException
-     (s/lower-case \"ABC\")        -> \"abc\"
-     (maybe? s/lower-case nil)     -> true
-     (maybe? s/lower-case \"ABC\") -> \"abc\"
+     (str/lower-case nil)            -> NullPointerException
+     (str/lower-case \"ABC\")        -> \"abc\"
+     (maybe? str/lower-case nil)     -> true
+     (maybe? str/lower-case \"ABC\") -> \"abc\"
 
    The latter use-case can be useful for things like sorting where some values in a collection
    might be `nil`:
 
-     (sort-by (partial maybe? s/lower-case) some-collection)"
+     (sort-by (partial maybe? str/lower-case) some-collection)"
   [f x]
   (or (nil? x)
       (f x)))
@@ -577,7 +615,7 @@
                                               (vec (for [frame this
                                                          :let  [s (str frame)]
                                                          :when (re-find #"metabase" s)]
-                                                     (s/replace s #"^metabase\." ""))))})
+                                                     (str/replace s #"^metabase\." ""))))})
 
 (defn wrap-try-catch
   "Returns a new function that wraps F in a `try-catch`. When an exception is caught, it is logged
@@ -676,7 +714,7 @@
   "Return a version of S with diacritical marks removed."
   ^String [^String s]
   (when (seq s)
-    (s/replace
+    (str/replace
      ;; First, "decompose" the characters. e.g. replace 'LATIN CAPITAL LETTER A WITH ACUTE' with 'LATIN CAPITAL LETTER
      ;; A' + 'COMBINING ACUTE ACCENT' See http://docs.oracle.com/javase/8/docs/api/java/text/Normalizer.html
      (Normalizer/normalize s Normalizer$Form/NFD)
@@ -709,10 +747,10 @@
    Optionally specify MAX-LENGTH which will truncate the slug after that many characters."
   (^String [^String s]
    (when (seq s)
-     (s/join (for [c (remove-diacritical-marks (s/lower-case s))]
+     (str/join (for [c (remove-diacritical-marks (str/lower-case s))]
                (slugify-char c)))))
   (^String [s max-length]
-   (s/join (take max-length (slugify s)))))
+   (str/join (take max-length (slugify s)))))
 
 (defn do-with-auto-retries
   "Execute F, a function that takes no arguments, and return the results.
@@ -754,7 +792,7 @@
      (keyword->qualified-name :type/FK) ->  \"type/FK\""
   [k]
   (when k
-    (s/replace (str k) #"^:" "")))
+    (str/replace (str k) #"^:" "")))
 
 (defn get-id
   "Return the value of `:id` if OBJECT-OR-ID is a map, or otherwise return OBJECT-OR-ID as-is if it is an integer.
@@ -833,7 +871,7 @@
   ^Long [^String s, ^String substr]
   (when (and (seq s) (seq substr))
     (loop [index 0, cnt 0]
-      (if-let [^long new-index (s/index-of s substr index)]
+      (if-let [^long new-index (str/index-of s substr index)]
         (recur (inc new-index) (inc cnt))
         cnt))))
 

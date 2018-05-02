@@ -230,11 +230,8 @@
 
   DateTimeField
   (parse-value [this value]
-    (let [tz                 (when-let [tz-id ^String (setting/get :report-timezone)]
-                               (TimeZone/getTimeZone tz-id))
-          parsed-string-date (some-> value
-                                     (u/str->date-time tz)
-                                     u/->Timestamp)]
+    (let [tz (or (setting/get :report-timezone) (System/getProperty "user.timezone"))
+          parsed-string-date (some-> value (u/->Timestamp tz))]
       (cond
         parsed-string-date
         (s/validate DateTimeValue (i/map->DateTimeValue {:field this, :value parsed-string-date}))

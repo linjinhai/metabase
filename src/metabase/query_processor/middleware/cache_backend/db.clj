@@ -14,7 +14,8 @@
   (when-let [{:keys [results updated_at]} (db/select-one [QueryCache :results :updated_at]
                                             :query_hash query-hash
                                             :updated_at [:>= (u/->Timestamp (- (System/currentTimeMillis)
-                                                                               (* 1000 max-age-seconds)))])]
+                                                                               (* 1000 max-age-seconds))
+                                                                            "UTC")])]
     (assoc results :updated_at updated_at)))
 
 (defn- purge-old-cache-entries!
@@ -22,7 +23,8 @@
   []
   (db/simple-delete! QueryCache
     :updated_at [:<= (u/->Timestamp (- (System/currentTimeMillis)
-                                       (* 1000 (public-settings/query-caching-max-ttl))))]))
+                                       (* 1000 (public-settings/query-caching-max-ttl)))
+                                    "UTC")]))
 
 (defn- save-results!
   "Save the RESULTS of query with QUERY-HASH, updating an existing QueryCache entry

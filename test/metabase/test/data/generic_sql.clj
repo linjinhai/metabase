@@ -173,7 +173,7 @@
       (zipmap fields-for-insert (for [v row]
                                   (if (and (not (instance? java.sql.Time v))
                                            (instance? java.util.Date v))
-                                    (u/->Timestamp v)
+                                    (u/->Timestamp v u/utc)
                                     v))))))
 
 (defn load-data-add-ids

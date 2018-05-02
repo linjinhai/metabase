@@ -21,7 +21,7 @@
                     Field [_ {:table_id            (u/get-id table)
                               :name                "Current fingerprint, already analzed"
                               :fingerprint_version Short/MAX_VALUE
-                              :last_analyzed       (u/->Timestamp "2017-08-09")}]
+                              :last_analyzed       (u/->Timestamp #inst "2017-08-09")}]
                     Field [_ {:table_id            (u/get-id table)
                               :name                "Old fingerprint, not analyzed"
                               :fingerprint_version (dec Short/MAX_VALUE)
@@ -29,6 +29,6 @@
                     Field [_ {:table_id            (u/get-id table)
                               :name                "Old fingerprint, already analzed"
                               :fingerprint_version (dec Short/MAX_VALUE)
-                              :last_analyzed       (u/->Timestamp "2017-08-09")}]]
+                              :last_analyzed       (u/->Timestamp #inst "2017-08-09")}]]
       (for [field (#'classify/fields-to-classify table)]
         (:name field)))))

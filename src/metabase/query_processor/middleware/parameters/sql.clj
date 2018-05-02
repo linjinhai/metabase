@@ -21,6 +21,7 @@
            honeysql.types.SqlCall
            java.text.NumberFormat
            java.util.regex.Pattern
+           java.util.TimeZone
            metabase.models.field.FieldInstance))
 
 ;; The Basics:
@@ -373,15 +374,17 @@
 
   Date
   (->replacement-snippet-info [{:keys [s]}]
-    (honeysql->replacement-snippet-info (u/->Timestamp s)))
+    (honeysql->replacement-snippet-info (u/->Timestamp s *timezone*)))
 
   DateRange
   (->replacement-snippet-info [{:keys [start end]}]
-    (cond
-      (= start end) {:replacement-snippet "= ?",             :prepared-statement-args [(u/->Timestamp start)]}
-      (nil? start)  {:replacement-snippet "< ?",             :prepared-statement-args [(u/->Timestamp end)]}
-      (nil? end)    {:replacement-snippet "> ?",             :prepared-statement-args [(u/->Timestamp start)]}
-      :else         {:replacement-snippet "BETWEEN ? AND ?", :prepared-statement-args [(u/->Timestamp start) (u/->Timestamp end)]}))
+    (let [timestamp-fn #(u/->Timestamp % *timezone*)]
+      (cond
+        (= start end) {:replacement-snippet "= ?",             :prepared-statement-args [(timestamp-fn start)]}
+        (nil? start)  {:replacement-snippet "< ?",             :prepared-statement-args [(timestamp-fn end)]}
+        (nil? end)    {:replacement-snippet "> ?",             :prepared-statement-args [(timestamp-fn start)]}
+        :else         {:replacement-snippet "BETWEEN ? AND ?", :prepared-statement-args [(timestamp-fn start)
+                                                                                         (timestamp-fn end)]})))
 
   ;; TODO - clean this up if possible!
   Dimension
@@ -530,7 +533,7 @@
   "Expand parameters inside a *SQL* QUERY."
   [query]
   (binding [*driver*   (ensure-driver query)
-            *timezone* (get-in query [:settings :report-timezone])]
+            *timezone* (get-in query [:settings :report-timezone] (.getID (TimeZone/getDefault)))]
     (if (driver/driver-supports? *driver* :native-query-params)
       (update query :native expand-query-params (query->params-map query))
       query)))

@@ -239,7 +239,7 @@
                                                                                     :type   {:type/DateTime {:earliest "2014-01-01T00:00:00.000Z"
                                                                                                              :latest   "2014-12-05T00:00:00.000Z"}}}})
                                                 :unit  :year}
-                                  :value       {:value (u/->Timestamp "1980-01-01")
+                                  :value       {:value (u/->Timestamp #inst "1980-01-01")
                                                 :field {:field
                                                         (merge field-defaults
                                                                {:field-id           (id :users :last_login)

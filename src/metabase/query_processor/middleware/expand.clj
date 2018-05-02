@@ -19,6 +19,8 @@
 ;;; |                                                CLAUSE HANDLERS                                                 |
 ;;; +----------------------------------------------------------------------------------------------------------------+
 
+(def ^:private ^:dynamic *report-timezone* nil)
+
 ;; TODO - check that there's a matching :aggregation clause in the query ?
 (s/defn ^:ql aggregate-field :- AgFieldRef
   "Aggregate field referece, e.g. for use in an `order-by` clause.
@@ -110,9 +112,9 @@
     (instance? RelativeDateTimeValue v) v
     (instance? DateTimeValue v)         v
     (instance? RelativeDatetime v)      (i/map->RelativeDateTimeValue (assoc v :unit (datetime-unit f v), :field (datetime-field f (datetime-unit f v))))
-    (instance? DateTimeField f)         (i/map->DateTimeValue {:value (u/->Timestamp v), :field f})
+    (instance? DateTimeField f)         (i/map->DateTimeValue {:value (u/->Timestamp v *report-timezone*), :field f})
     (instance? FieldLiteral f)          (if (isa? (:base-type f) :type/DateTime)
-                                          (i/map->DateTimeValue {:value (u/->Timestamp v)
+                                          (i/map->DateTimeValue {:value (u/->Timestamp v *report-timezone*)
                                                                  :field (i/map->DateTimeField {:field f :unit :default})})
                                           (i/map->Value {:value v, :field f}))
     :else                               (i/map->ValuePlaceholder {:field-placeholder (field f), :value v})))
@@ -596,7 +598,8 @@
    The \"placeholder\" objects above are fetched from the DB and replaced in the next QP step, in
    `metabase.query-processor.middleware.resolve`."
   [outer-query]
-  (update outer-query :query expand-inner))
+  (binding [*report-timezone* (get-in outer-query [:settings :report-timezone] (System/getProperty "user.timezone"))]
+    (update outer-query :query expand-inner)))
 
 (defn expand-middleware
   "Wraps `expand` in a query-processor middleware function"

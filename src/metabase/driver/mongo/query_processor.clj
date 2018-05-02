@@ -17,7 +17,7 @@
              [collection :as mc]
              [operators :refer :all]])
   (:import java.sql.Timestamp
-           java.util.Date
+           [java.util Date TimeZone]
            [metabase.query_processor.interface AgFieldRef DateTimeField DateTimeValue Field FieldLiteral
             RelativeDateTimeValue Value]
            org.bson.types.ObjectId
@@ -416,7 +416,7 @@
     (into {} (for [[k v] row]
                {k (if (and (map? v)
                            (:___date v))
-                    (u/->Timestamp (:___date v))
+                    (u/->Timestamp (:___date v) (TimeZone/getDefault))
                     v)}))))
 
 
